@@ -270,8 +270,9 @@ def build_song(ctx, song_id, matches, mdm_path):
         def lvl_designer(n):
             return info.get(f'levelDesigner{n}') or info.get('levelDesigner') or ''
         def diff_for(n, entry):
-            v = str(info.get(f'difficulty{plan[n]}', '0'))
-            return v if v not in ('0', '') else entry.get(f'difficulty{n}', '0')
+            v = str(info.get(f'difficulty{plan[n]}', '0')).strip()
+            # only plain numbers are safe: the game can't parse values like "?" in the song list
+            return v if v.isdigit() and v != '0' else entry.get(f'difficulty{n}', '0')
         for m in matches:
             orig = m['entry']
             for _, _, arr in cfg.arrays(m['others_bundle']):
@@ -281,9 +282,12 @@ def build_song(ctx, song_id, matches, mdm_path):
                 if info.get('scene'): e['scene'] = norm_scene(info['scene'])
                 for n in plan:
                     if orig.get(f'difficulty{n}', '0') in ('0', ''): continue  # this entry doesn't have the slot
-                    e[f'levelDesigner{n}'] = lvl_designer(n)
-                    e[f'difficulty{n}'] = diff_for(n, orig)
-                    if f'callBackDifficulty{n}' in e: e[f'callBackDifficulty{n}'] = diff_for(n, orig)
+                    # the chart doesn't have this difficulty: hide the slot (like the game does with "0")
+                    # instead of showing a copy of another map
+                    val = diff_for(n, orig) if n in avail else '0'
+                    if n in avail: e[f'levelDesigner{n}'] = lvl_designer(n)
+                    e[f'difficulty{n}'] = val
+                    if f'callBackDifficulty{n}' in e: e[f'callBackDifficulty{n}'] = val
             for lang in LANGS:
                 fs = glob.glob(bundle_path(romfs, f'config_{lang}_assets_{m["album"]}_{lang}_*.bundle'))
                 if not fs: continue

@@ -1,3 +1,9 @@
+# This file is a Python port of code from MDMods/CustomAlbums
+# (https://github.com/MDMods/CustomAlbums), used under the MIT license:
+#
+#   MIT License
+#   Copyright (c) 2025 Muse Dash Modding Community
+#   (full license text: see LICENSE, "Third-party notice")
 """Port of MDMods/CustomAlbums BmsLoader/Bms (MIT) to offline Python.
 Produces Muse Dash MusicData records ready for odin_stage.write_stage."""
 import json, math, re

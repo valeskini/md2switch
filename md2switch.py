@@ -45,6 +45,15 @@ def read_text(o):
     return d, (s if isinstance(s, str) else s.decode('utf-8-sig'))
 
 
+_JSONC = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|,(?=\s*[}\]])', re.S)
+
+
+def loads_lenient(s):
+    """json.loads that also accepts what the game's config files contain:
+    // and /* */ comments and trailing commas (strings are left untouched)."""
+    return json.loads(_JSONC.sub(lambda m: m.group(0) if m.group(0).startswith('"') else '', s))
+
+
 def write_text(o, d, text):
     d.m_Script = text
     d.save()
@@ -63,7 +72,7 @@ def find_song(romfs, song_id):
         for o in text_assets(env):
             _, s = read_text(o)
             if f'"{song_id}_music"' not in s: continue
-            arr = json.loads(s)
+            arr = loads_lenient(s)
             for i, e in enumerate(arr):
                 if e.get('music') == f'{song_id}_music':
                     alb = re.match(r'config_others_assets_(album\d+)_', os.path.basename(f)).group(1)
@@ -77,11 +86,11 @@ def cmd_search(romfs, text):
     for f in album_bundles(romfs, 'english'):
         alb = re.match(r'config_english_assets_(album\d+)_english', os.path.basename(f)).group(1)
         for o in text_assets(UnityPy.load(f)):
-            eng[alb] = json.loads(read_text(o)[1])
+            eng[alb] = loads_lenient(read_text(o)[1])
     for f in album_bundles(romfs):
         alb = re.match(r'config_others_assets_(album\d+)_', os.path.basename(f)).group(1)
         for o in text_assets(UnityPy.load(f)):
-            for i, e in enumerate(json.loads(read_text(o)[1])):
+            for i, e in enumerate(loads_lenient(read_text(o)[1])):
                 loc = eng.get(alb, [])
                 en = loc[i] if i < len(loc) else {}
                 blob = ' '.join([e.get('music', ''), e.get('name', ''), e.get('author', ''), en.get('name', ''), en.get('author', '')]).lower()
@@ -162,7 +171,7 @@ def build(romfs, mdm_path, song_id, out, only=None):
     pd = json.load(open(os.path.join(data, 'prefab_data.json')))
     bd = json.load(open(os.path.join(data, 'boss_durations.json')))
     nd_bundle = glob.glob(bundle_path(romfs, 'config_others_assets_notedata_*.bundle'))[0]
-    notedata = json.loads(read_text(next(text_assets(UnityPy.load(nd_bundle))))[1])
+    notedata = loads_lenient(read_text(next(text_assets(UnityPy.load(nd_bundle))))[1])
     T = Transmuter(notedata, pd['startDelay'], pd['boss'], bd)
 
     tmp = tempfile.mkdtemp(prefix='md2switch_')
@@ -244,7 +253,7 @@ def build(romfs, mdm_path, song_id, out, only=None):
         ob = os.path.basename(song['others_bundle'])
         env = UnityPy.load(song['others_bundle'])
         for o in text_assets(env):
-            d, s = read_text(o); arr = json.loads(s); e = arr[song['index']]
+            d, s = read_text(o); arr = loads_lenient(s); e = arr[song['index']]
             e['name'] = name; e['author'] = author
             if bpm_val is not None: e['bpm'] = info.get('bpm', str(bpm_val))
             if info.get('scene'): e['scene'] = norm_scene(info['scene'])
@@ -259,7 +268,7 @@ def build(romfs, mdm_path, song_id, out, only=None):
             if not fs: continue
             env = UnityPy.load(fs[0])
             for o in text_assets(env):
-                d, s = read_text(o); arr = json.loads(s)
+                d, s = read_text(o); arr = loads_lenient(s)
                 if song['index'] < len(arr):
                     arr[song['index']]['name'] = name; arr[song['index']]['author'] = author
                 write_text(o, d, json.dumps(arr, ensure_ascii=False, indent='\t'))

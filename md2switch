@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# wrapper so you don't have to activate the venv
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec "$DIR/.venv/bin/python" "$DIR/md2switch.py" "$@"

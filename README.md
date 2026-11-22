@@ -61,7 +61,18 @@ Build the mod. All difficulties of the target song get your chart:
 ./md2switch build ~/muserom MyChart.mdm bamboo -o ~/my_mod
 ```
 
-Overwrite only one difficulty slot:
+Replace several songs in one build with `--song ID=CHART.mdm` (repeat it). Do this instead of
+running `build` several times into the same folder: each build writes its own `catalog.json` and
+album configs, so a later build would overwrite the earlier one's changes.
+
+```bash
+./md2switch build ~/muserom --song bamboo=MyChart.mdm --song strastella=Other.mdm -o ~/my_mod
+```
+
+Some song ids appear more than once in the game's album configs (`search` shows each entry's `uid`).
+All entries that share the id are patched.
+
+Overwrite only one difficulty slot (applies to every song in the build):
 
 ```bash
 ./md2switch build ~/muserom MyChart.mdm bamboo --only 2

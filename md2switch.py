@@ -5,6 +5,7 @@ that replaces an existing song on the Nintendo Switch version.
 Usage:
   md2switch.py search <romfs> <text>                 find song ids (e.g. "bamboo")
   md2switch.py build  <romfs> <chart.mdm> <song_id> [-o OUT] [--only 2,3]
+  md2switch.py build  <romfs> --song ID=chart.mdm [--song ID=chart.mdm ...] [-o OUT]
 
 <romfs> is the extracted RomFS folder (the one containing Data/).
 """
@@ -67,6 +68,8 @@ def album_bundles(romfs, lang='others'):
 
 
 def find_song(romfs, song_id):
+    """All album entries that use this song id (some ids appear more than once)."""
+    found = []
     for f in album_bundles(romfs):
         env = UnityPy.load(f)
         for o in text_assets(env):
@@ -76,8 +79,10 @@ def find_song(romfs, song_id):
             for i, e in enumerate(arr):
                 if e.get('music') == f'{song_id}_music':
                     alb = re.match(r'config_others_assets_(album\d+)_', os.path.basename(f)).group(1)
-                    return {'album': alb, 'index': i, 'entry': e, 'others_bundle': f}
-    raise SystemExit(f'song id "{song_id}" not found in album configs')
+                    found.append({'album': alb, 'index': i, 'entry': e, 'others_bundle': f})
+    if not found:
+        raise SystemExit(f'song id "{song_id}" not found in album configs')
+    return found
 
 
 def cmd_search(romfs, text):
@@ -97,7 +102,7 @@ def cmd_search(romfs, text):
                 if text in blob:
                     sid = e.get('music', '').replace('_music', '')
                     maps = [k[-1] for k in ('difficulty1', 'difficulty2', 'difficulty3', 'difficulty4') if e.get(k, '0') not in ('0', '')]
-                    print(f'{sid:30s} {en.get("name", e.get("name")):35s} {en.get("author", e.get("author"))}  [maps {",".join(maps)}]')
+                    print(f'{sid:30s} {en.get("name", e.get("name")):35s} {en.get("author", e.get("author"))}  [uid {e.get("uid", "?")}, maps {",".join(maps)}]')
 
 
 # ---------------------------------------------------------------- mdm
@@ -166,35 +171,52 @@ def save_bundle(env, dst):
 
 
 # ---------------------------------------------------------------- build
-def build(romfs, mdm_path, song_id, out, only=None):
-    data = os.path.join(HERE, 'data')
-    pd = json.load(open(os.path.join(data, 'prefab_data.json')))
-    bd = json.load(open(os.path.join(data, 'boss_durations.json')))
-    nd_bundle = glob.glob(bundle_path(romfs, 'config_others_assets_notedata_*.bundle'))[0]
-    notedata = loads_lenient(read_text(next(text_assets(UnityPy.load(nd_bundle))))[1])
-    T = Transmuter(notedata, pd['startDelay'], pd['boss'], bd)
+class ConfigStore:
+    """Album config bundles are loaded once, edited in memory by every song,
+    and written once at the end, so several songs in the same album don't
+    overwrite each other's changes."""
 
+    def __init__(self):
+        self.items = {}  # bundle path -> (env, [(object, text asset, parsed list)])
+
+    def arrays(self, path):
+        if path not in self.items:
+            env = UnityPy.load(path)
+            lst = []
+            for o in text_assets(env):
+                d, s = read_text(o)
+                lst.append((o, d, loads_lenient(s)))
+            self.items[path] = (env, lst)
+        return self.items[path][1]
+
+    def save_all(self, out_sw, touched):
+        for path, (env, lst) in self.items.items():
+            for o, d, arr in lst:
+                write_text(o, d, json.dumps(arr, ensure_ascii=False, indent='\t'))
+            save_bundle(env, os.path.join(out_sw, os.path.basename(path)))
+            touched.append(os.path.basename(path))
+
+
+def build_song(ctx, song_id, matches, mdm_path):
+    romfs, out_sw, T, cfg, touched, only = (ctx[k] for k in ('romfs', 'out_sw', 'T', 'cfg', 'touched', 'only'))
     tmp = tempfile.mkdtemp(prefix='md2switch_')
     try:
         mdm = load_mdm(mdm_path, tmp)
         info = mdm['info']
-        if not mdm['maps']: raise SystemExit('no mapN.bms in .mdm')
-        if not mdm['music']: raise SystemExit('no music file in .mdm')
-        song = find_song(romfs, song_id)
-        entry = song['entry']
-        out_sw = os.path.join(out, 'atmosphere', 'contents', TITLE_ID, 'romfs', 'Data', 'StreamingAssets', 'aa', 'Switch')
-        cat = Catalog(os.path.join(aa_dir(romfs), 'catalog.json'))
-        touched = []
+        if not mdm['maps']: raise SystemExit(f'{mdm_path}: no mapN.bms in .mdm')
+        if not mdm['music']: raise SystemExit(f'{mdm_path}: no music file in .mdm')
 
-        # ---- which slot gets which chart
-        target_slots = [n for n in range(1, 5) if entry.get(f'difficulty{n}', '0') not in ('0', '')]
+        # ---- which slot gets which chart (a song id can have several entries: use all their slots)
+        target_slots = [n for n in range(1, 5)
+                        if any(m['entry'].get(f'difficulty{n}', '0') not in ('0', '') for m in matches)]
         avail = sorted(mdm['maps'])
         plan = {}
         for n in target_slots:
             if only and n not in only: continue
             src = n if n in avail else min(avail, key=lambda a: (abs(a - n), a))
             plan[n] = src
-        print(f'Replacing "{song_id}" ({song["album"]}, #{song["index"]}): ' +
+        where = ', '.join(f'{m["album"]}#{m["index"]} ({m["entry"].get("uid", "?")})' for m in matches)
+        print(f'Replacing "{song_id}" [{where}]: ' +
               ', '.join(f'map{n} <- map{s}.bms' for n, s in plan.items()))
 
         # ---- music bundle (charts + music)
@@ -243,62 +265,96 @@ def build(romfs, mdm_path, song_id, out, only=None):
             if changed:
                 save_bundle(env, os.path.join(out_sw, sb)); touched.append(sb)
 
-        # ---- album configs (titles, designers, difficulty numbers)
+        # ---- album configs (edited in memory, written at the end by ConfigStore)
         name = info.get('name', song_id); author = info.get('author', '')
         def lvl_designer(n):
             return info.get(f'levelDesigner{n}') or info.get('levelDesigner') or ''
-        def diff_for(n):
-            s = plan[n]; v = str(info.get(f'difficulty{s}', '0'))
+        def diff_for(n, entry):
+            v = str(info.get(f'difficulty{plan[n]}', '0'))
             return v if v not in ('0', '') else entry.get(f'difficulty{n}', '0')
-        ob = os.path.basename(song['others_bundle'])
-        env = UnityPy.load(song['others_bundle'])
-        for o in text_assets(env):
-            d, s = read_text(o); arr = loads_lenient(s); e = arr[song['index']]
-            e['name'] = name; e['author'] = author
-            if bpm_val is not None: e['bpm'] = info.get('bpm', str(bpm_val))
-            if info.get('scene'): e['scene'] = norm_scene(info['scene'])
-            for n in plan:
-                e[f'levelDesigner{n}'] = lvl_designer(n)
-                e[f'difficulty{n}'] = diff_for(n)
-                if f'callBackDifficulty{n}' in e: e[f'callBackDifficulty{n}'] = diff_for(n)
-            write_text(o, d, json.dumps(arr, ensure_ascii=False, indent='\t'))
-        save_bundle(env, os.path.join(out_sw, ob)); touched.append(ob)
-        for lang in LANGS:
-            fs = glob.glob(bundle_path(romfs, f'config_{lang}_assets_{song["album"]}_{lang}_*.bundle'))
-            if not fs: continue
-            env = UnityPy.load(fs[0])
-            for o in text_assets(env):
-                d, s = read_text(o); arr = loads_lenient(s)
-                if song['index'] < len(arr):
-                    arr[song['index']]['name'] = name; arr[song['index']]['author'] = author
-                write_text(o, d, json.dumps(arr, ensure_ascii=False, indent='\t'))
-            save_bundle(env, os.path.join(out_sw, os.path.basename(fs[0]))); touched.append(os.path.basename(fs[0]))
+        for m in matches:
+            orig = m['entry']
+            for _, _, arr in cfg.arrays(m['others_bundle']):
+                e = arr[m['index']]
+                e['name'] = name; e['author'] = author
+                if bpm_val is not None: e['bpm'] = info.get('bpm', str(bpm_val))
+                if info.get('scene'): e['scene'] = norm_scene(info['scene'])
+                for n in plan:
+                    if orig.get(f'difficulty{n}', '0') in ('0', ''): continue  # this entry doesn't have the slot
+                    e[f'levelDesigner{n}'] = lvl_designer(n)
+                    e[f'difficulty{n}'] = diff_for(n, orig)
+                    if f'callBackDifficulty{n}' in e: e[f'callBackDifficulty{n}'] = diff_for(n, orig)
+            for lang in LANGS:
+                fs = glob.glob(bundle_path(romfs, f'config_{lang}_assets_{m["album"]}_{lang}_*.bundle'))
+                if not fs: continue
+                for _, _, arr in cfg.arrays(fs[0]):
+                    if m['index'] < len(arr):
+                        arr[m['index']]['name'] = name; arr[m['index']]['author'] = author
         print(f'  titles set to "{name}" by "{author}"')
-
-        # ---- catalog CRCs
-        for b in touched:
-            if cat.zero_crc(b): print(f'  catalog: CRC check disabled for {b}')
-        if cat.changed:
-            cat.save(os.path.join(os.path.dirname(out_sw), 'catalog.json'))
-        print(f'\nDone -> {os.path.join(out, "atmosphere")}')
-        print('Copy that "atmosphere" folder to the root of your SD card (merge).')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def build(romfs, jobs, out, only=None):
+    """jobs: list of (song_id, mdm_path). All songs end up in one output folder."""
+    ids = [j[0] for j in jobs]
+    if len(set(ids)) != len(ids):
+        raise SystemExit('the same song id was given twice')
+    # look everything up first so a typo fails before any slow work
+    found = [(sid, find_song(romfs, sid), mdm) for sid, mdm in jobs]
+    for _, _, mdm in found:
+        if not os.path.isfile(mdm): raise SystemExit(f'chart not found: {mdm}')
+
+    data = os.path.join(HERE, 'data')
+    pd = json.load(open(os.path.join(data, 'prefab_data.json')))
+    bd = json.load(open(os.path.join(data, 'boss_durations.json')))
+    nd_bundle = glob.glob(bundle_path(romfs, 'config_others_assets_notedata_*.bundle'))[0]
+    notedata = loads_lenient(read_text(next(text_assets(UnityPy.load(nd_bundle))))[1])
+    ctx = {
+        'romfs': romfs, 'only': only, 'touched': [], 'cfg': ConfigStore(),
+        'T': Transmuter(notedata, pd['startDelay'], pd['boss'], bd),
+        'out_sw': os.path.join(out, 'atmosphere', 'contents', TITLE_ID, 'romfs', 'Data', 'StreamingAssets', 'aa', 'Switch'),
+    }
+    for sid, matches, mdm in found:
+        build_song(ctx, sid, matches, mdm)
+
+    ctx['cfg'].save_all(ctx['out_sw'], ctx['touched'])
+    # ---- catalog CRCs (one catalog for all songs)
+    cat = Catalog(os.path.join(aa_dir(romfs), 'catalog.json'))
+    for b in ctx['touched']:
+        if cat.zero_crc(b): print(f'catalog: CRC check disabled for {b}')
+    if cat.changed:
+        cat.save(os.path.join(os.path.dirname(ctx['out_sw']), 'catalog.json'))
+    print(f'\nDone ({len(jobs)} song{"s" if len(jobs) != 1 else ""}) -> {os.path.join(out, "atmosphere")}')
+    print('Copy that "atmosphere" folder to the root of your SD card (merge).')
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('search'); s.add_argument('romfs'); s.add_argument('text')
-    b = sub.add_parser('build'); b.add_argument('romfs'); b.add_argument('mdm'); b.add_argument('song_id')
-    b.add_argument('-o', '--out', default=None, help='output folder (default: ./<song_id>_mod)')
-    b.add_argument('--only', default=None, help='only replace these difficulty slots, e.g. 2 or 1,2,3')
+    b = sub.add_parser('build'); b.add_argument('romfs')
+    b.add_argument('mdm', nargs='?'); b.add_argument('song_id', nargs='?')
+    b.add_argument('--song', action='append', default=[], metavar='ID=CHART.mdm',
+                   help='replace a song; repeat for several songs in one build')
+    b.add_argument('-o', '--out', default=None, help='output folder (default: ./<song_id>_mod, or ./md2switch_mod for several songs)')
+    b.add_argument('--only', default=None, help='only replace these difficulty slots (all songs), e.g. 2 or 1,2,3')
     a = ap.parse_args()
     if a.cmd == 'search':
         cmd_search(a.romfs, a.text)
-    else:
-        only = {int(x) for x in a.only.split(',')} if a.only else None
-        build(a.romfs, a.mdm, a.song_id, a.out or f'./{a.song_id}_mod', only)
+        return
+    jobs = []
+    for spec in a.song:
+        sid, sep, path = spec.partition('=')
+        if not sep or not sid or not path: ap.error(f'--song needs ID=CHART.mdm, got "{spec}"')
+        jobs.append((sid, path))
+    if a.mdm or a.song_id:
+        if not (a.mdm and a.song_id): ap.error('give both <chart.mdm> and <song_id>, or use --song ID=CHART.mdm')
+        jobs.insert(0, (a.song_id, a.mdm))
+    if not jobs: ap.error('nothing to build: give <chart.mdm> <song_id> or --song ID=CHART.mdm')
+    only = {int(x) for x in a.only.split(',')} if a.only else None
+    out = a.out or (f'./{jobs[0][0]}_mod' if len(jobs) == 1 else './md2switch_mod')
+    build(a.romfs, jobs, out, only)
 
 
 if __name__ == '__main__':
